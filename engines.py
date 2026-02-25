@@ -5,7 +5,7 @@ import time
 import queue
 import threading
 import cv2
-import speech_recognition as sr
+import pytesseract
 from PIL import Image             
 from google import genai          
 from google.genai import types
@@ -14,49 +14,66 @@ import asyncio
 import pygame
 import os
 
-# ==========================================
-# 1. THE SCOUT (Memory & Sportsbook Engine)
-# ==========================================
+# ==============================================================================
+# 1. THE SCOUT (Database & Memory Engine)
+# Handles all SQLite database interactions: Viewers, Bankrolls, and Opponent Notes.
+# ==============================================================================
 class ScoutBrain:
     def __init__(self, db_name="scout.db"):
+        """Initializes the database and creates the tables if they don't exist yet."""
         self.conn = sqlite3.connect(db_name, check_same_thread=False)
         self.cursor = self.conn.cursor()
         
+        # Build the foundational tables for the economy and scouting
         self.cursor.execute("CREATE TABLE IF NOT EXISTS viewers (username TEXT PRIMARY KEY, chat_count INTEGER DEFAULT 0, bankroll INTEGER DEFAULT 1000)")
-        self.cursor.execute("CREATE TABLE IF NOT EXISTS custom_personas (name TEXT PRIMARY KEY, description TEXT)") 
         self.cursor.execute("CREATE TABLE IF NOT EXISTS active_bets (username TEXT PRIMARY KEY, prediction TEXT, amount INTEGER, multiplier REAL)")
-        self.cursor.execute("CREATE TABLE IF NOT EXISTS reward_claims (username TEXT, reward_name TEXT, PRIMARY KEY(username, reward_name))")
-        
         self.cursor.execute("CREATE TABLE IF NOT EXISTS film_room (id INTEGER PRIMARY KEY AUTOINCREMENT, opponent_tag TEXT, note TEXT)")
         self.conn.commit()
         
-        self.current_market = {} 
+        self.current_market = {}     # Holds the active betting options and odds
+        self.market_locked = False   # Prevents betting after the timer expires
 
     def get_bankroll(self, username):
+        """Fetches a user's balance. If they are new, it gives them the default $1000."""
         self.cursor.execute("INSERT OR IGNORE INTO viewers (username) VALUES (?)", (username,))
         self.cursor.execute("SELECT bankroll FROM viewers WHERE username = ?", (username,))
         self.conn.commit()
         return self.cursor.fetchone()[0]
+        
+    def get_leaderboard(self, limit=5):
+        """Fetches the wealthiest viewers in the channel for the OBS Overlay."""
+        self.cursor.execute("SELECT username, bankroll FROM viewers ORDER BY bankroll DESC LIMIT ?", (limit,))
+        return self.cursor.fetchall()
 
     def open_market(self, options_dict):
+        """Starts a new betting round and clears out any old bets."""
         self.current_market = options_dict
+        self.market_locked = False
         self.cursor.execute("DELETE FROM active_bets") 
         self.conn.commit()
 
+    def lock_market(self):
+        """Freezes the sportsbook so viewers can't place late bets."""
+        self.market_locked = True
+
     def place_bet(self, username, prediction, amount):
+        """Processes a viewer's bet. Returns success status, new balance, and error codes."""
         balance = self.get_bankroll(username)
+        if self.market_locked: return False, balance, "locked" 
         if prediction not in self.current_market: return False, balance, "invalid"
         if balance < amount: return False, balance, "funds"
             
         multiplier = self.current_market[prediction]
         new_balance = balance - amount
         
+        # Deduct money and save the bet ticket
         self.cursor.execute("UPDATE viewers SET bankroll = ? WHERE username = ?", (new_balance, username))
         self.cursor.execute("INSERT OR REPLACE INTO active_bets (username, prediction, amount, multiplier) VALUES (?, ?, ?, ?)", (username, prediction, amount, multiplier))
         self.conn.commit()
         return True, new_balance, multiplier
 
     def resolve_bets(self, winning_prediction):
+        """Pays out the winners when the streamer manually ends the bet."""
         if winning_prediction not in self.current_market: return 0, 0 
             
         self.cursor.execute("SELECT username, amount, multiplier FROM active_bets WHERE prediction = ?", (winning_prediction,))
@@ -73,45 +90,24 @@ class ScoutBrain:
         self.conn.commit()
         return len(winners), total_paid
 
-    def purchase_reward(self, username, cost, reward_name, is_one_time=False):
-        balance = self.get_bankroll(username)
-        if balance < cost: return "funds"
-
-        if is_one_time:
-            self.cursor.execute("SELECT 1 FROM reward_claims WHERE username = ? AND reward_name = ?", (username, reward_name))
-            if self.cursor.fetchone(): return "claimed"
-
-        new_balance = balance - cost
-        self.cursor.execute("UPDATE viewers SET bankroll = ? WHERE username = ?", (new_balance, username))
-        
-        if is_one_time:
-            self.cursor.execute("INSERT INTO reward_claims (username, reward_name) VALUES (?, ?)", (username, reward_name))
-            
-        self.conn.commit()
-        return "success"
-
-    def save_persona(self, name, description):
-        self.cursor.execute("INSERT OR REPLACE INTO custom_personas (name, description) VALUES (?, ?)", (name, description))
-        self.conn.commit()
-
-    def get_custom_personas(self):
-        self.cursor.execute("SELECT name, description FROM custom_personas")
-        return {row[0]: row[1] for row in self.cursor.fetchall()}
-
     def add_scout_note(self, opponent_tag, note):
+        """Saves a 1-sentence observation about the opponent to the Film Room."""
         if not opponent_tag: return
         self.cursor.execute("INSERT INTO film_room (opponent_tag, note) VALUES (?, ?)", (opponent_tag, note))
+        # Keep the database clean: Only save the 5 most recent notes per opponent
         self.cursor.execute("DELETE FROM film_room WHERE id NOT IN (SELECT id FROM film_room WHERE opponent_tag = ? ORDER BY id DESC LIMIT 5)", (opponent_tag,))
         self.conn.commit()
 
     def get_scout_notes(self, opponent_tag):
+        """Retrieves past observations about an opponent so the AI remembers them."""
         if not opponent_tag: return []
         self.cursor.execute("SELECT note FROM film_room WHERE opponent_tag = ? ORDER BY id DESC", (opponent_tag,))
         return [row[0] for row in self.cursor.fetchall()]
 
-# ==========================================
-# 2. THE VOICE (Edge-TTS)
-# ==========================================
+# ==============================================================================
+# 2. THE VOICE (Text-to-Speech Engine)
+# Converts text to audio. Runs on a separate thread so it doesn't freeze the bot.
+# ==============================================================================
 class VoiceEngine:
     def __init__(self):
         self.queue = queue.Queue()
@@ -123,12 +119,13 @@ class VoiceEngine:
         self.current_voice = voice_id
 
     def say(self, text):
+        """Adds text to the speech queue to be spoken aloud."""
         self.queue.put(text)
 
     def _worker(self):
+        """Background loop that continuously checks the queue for things to say."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
         while True:
             text = self.queue.get()
             if text is None: break
@@ -139,40 +136,15 @@ class VoiceEngine:
                 
                 pygame.mixer.music.load(audio_file)
                 pygame.mixer.music.play()
-                
-                while pygame.mixer.music.get_busy():
-                    time.sleep(0.1)
-            except Exception as e:
+                while pygame.mixer.music.get_busy(): time.sleep(0.1) # Wait until done speaking
+            except Exception as e: 
                 print(f"❌ Edge-TTS Error: {e}")
             self.queue.task_done()
 
-# ==========================================
-# 3. THE EARS (Speech Recognition)
-# ==========================================
-class EarEngine:
-    def __init__(self):
-        self.recognizer = sr.Recognizer()
-        self.mic = None
-
-    def list_microphones(self):
-        return sr.Microphone.list_microphone_names()
-
-    def set_microphone(self, index):
-        self.mic = sr.Microphone(device_index=index)
-        with self.mic as source:
-            self.recognizer.adjust_for_ambient_noise(source, duration=1)
-
-    def listen_once(self):
-        if not self.mic: return None
-        try:
-            with self.mic as source:
-                audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=5)
-                return self.recognizer.recognize_google(audio)
-        except: return None 
-
-# ==========================================
-# 4. THE VISION (OpenCV)
-# ==========================================
+# ==============================================================================
+# 3. THE VISION (Camera & Local OCR Engine)
+# Captures the screen and uses Tesseract to read text locally (saving API tokens).
+# ==============================================================================
 class VisionEngine:
     def __init__(self, camera_index=0):
         self.cap = cv2.VideoCapture(camera_index)
@@ -183,132 +155,137 @@ class VisionEngine:
         threading.Thread(target=self._update_loop, daemon=True).start()
 
     def _update_loop(self):
+        """Constantly pulls the newest frame from the capture card."""
         while self.running:
             ret, frame = self.cap.read()
             if ret: self.current_frame = frame
             time.sleep(0.01)
 
-    def get_frame(self): return self.current_frame
+    def get_frame(self): 
+        return self.current_frame
+        
+    def read_screen_text(self):
+        """Slices the frame into 3 Zones and reads the text instantly using local OCR."""
+        frame = self.get_frame()
+        if frame is None: return None
+
+        # THE FIX: Force the image to 1280x720 so our coordinates NEVER miss
+        frame = cv2.resize(frame, (1280, 720))
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # ROI (Region of Interest) ZONES for Madden 25 UI
+        zone_top = gray[10:90, 0:1280]       # Top Banners (Gamertags)
+        zone_bottom = gray[630:720, 0:1280]  # Bottom Scoreboard
+        zone_center = gray[280:440, 300:980] # Dead Center (Pop-ups)
+
+        # --psm 11 tells Tesseract to look for scattered game text
+        custom_config = r'--oem 3 --psm 11'
+        text_top = pytesseract.image_to_string(zone_top, config=custom_config).strip()
+        text_bottom = pytesseract.image_to_string(zone_bottom, config=custom_config).strip()
+        text_center = pytesseract.image_to_string(zone_center, config=custom_config).strip()
+
+        return f"TOP BANNER (Gamertags): {text_top} | SCOREBOARD: {text_bottom} | POPUPS: {text_center}"
     
     def __del__(self):
         self.running = False
         if self.cap.isOpened(): self.cap.release()
 
-# ==========================================
-# 5. THE STRATEGIST (Gemini 2.5 Flash)
-# ==========================================
+# ==============================================================================
+# 4. THE STRATEGIST (Gemini AI Engine)
+# Handles all communication with the Google Gemini API for coaching and betting.
+# ==============================================================================
 class AIEngine:
     def __init__(self, api_key):
         self.client = genai.Client(api_key=api_key)
         self.model = 'gemini-2.5-flash' 
 
     def _clean_json(self, text):
+        """Strips markdown formatting from the AI response to prevent JSON crashes."""
         text = text.strip()
         if text.startswith("```json"): text = text[7:]
         elif text.startswith("```"): text = text[3:]
         if text.endswith("```"): text = text[:-3]
         return text.strip()
 
-    def build_custom_persona(self, user_request):
+    def generate_prop_bet(self, image_path, game_type, streamer_name, gamer_tag):
+        """Generates a live, mid-game prop bet based on the current situation."""
         prompt = f"""
-        Research the following character, person, or archetype using Google Search: "{user_request}"
-        Write a 3-sentence persona description that completely embodies them. 
-        Include their exact tone, slang, catchphrases, and attitude.
-        Do not include markdown, just the raw text of the persona.
-        """
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.8, tools=[{"google_search": {}}])
-            )
-            return response.text.strip()
-        except Exception as e:
-            print(f"❌ Gemini Error: {e}")
-            return None
-
-    def generate_prop_bet(self, image_path, game_type, gamer_tag):
-        prompt = f"""
-        Look at this gameplay of {game_type}. The main player is '{gamer_tag}'.
-        Act as a Vegas oddsmaker. Generate a live prop bet for Twitch chat with 2 to 4 options (labeled a, b, c, d).
-        Assign realistic decimal odds to each option based on how likely it is to happen on screen right now.
-        
-        Output strict JSON in this exact format:
-        {{
-            "question": "What happens on this drive?",
-            "options": {{
-                "a": {{"text": "Touchdown", "odds": 2.5}},
-                "b": {{"text": "Field Goal", "odds": 1.8}},
-                "c": {{"text": "Turnover", "odds": 5.0}}
-            }}
-        }}
+        Look at this gameplay of {game_type}. You are coaching '{streamer_name}'. 
+        Their Gamertag is '{gamer_tag}'.
+        Act as a Vegas oddsmaker. Generate a live prop bet with 2 to 4 options (a, b, c, d) with decimal odds.
+        Output strict JSON: {{"question": "What happens?", "options": {{"a": {{"text": "TD", "odds": 2.5}}}} }}
         """
         try:
             img = Image.open(image_path)
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=[prompt, img],
-                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.7)
-            )
-            clean_text = self._clean_json(response.text)
-            return json.loads(clean_text)
-        except Exception as e:
-            print(f"❌ Gemini Error: {e}")
-            return None
+            response = self.client.models.generate_content(model=self.model, contents=[prompt, img], config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.7))
+            return json.loads(self._clean_json(response.text))
+        except Exception as e: return None
 
-    def analyze(self, image_path, game_type, personality_prompt, gamer_tag, user_question=None, scout_notes=None):
+    def generate_game_props(self, image_path, game_type, streamer_name, gamer_tag):
+        """Generates a Pre-Game parlay (Over/Under bets) for the whole match."""
+        prompt = f"""
+        Look at this opening screen of {game_type}. You are coaching '{streamer_name}'. 
+        Their Gamertag is '{gamer_tag}'.
+        Act as a Vegas oddsmaker. Generate a "Pre-Game Parlay" prop bet with 3 specific Over/Under options.
+        Output strict JSON: {{"question": "Pre-Game Prop: Which hits?", "options": {{"a": {{"text": "Over 2.5 Pass TDs", "odds": 1.9}}}} }}
+        """
+        try:
+            img = Image.open(image_path)
+            response = self.client.models.generate_content(model=self.model, contents=[prompt, img], config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.7))
+            return json.loads(self._clean_json(response.text))
+        except Exception as e: return None
+
+    def generate_auto_prop(self, image_path, game_type, streamer_name, gamer_tag):
+        """Auto-generates a bet on a timer and calculates how long it should stay open."""
+        prompt = f"""
+        Look at this gameplay of {game_type}. You are coaching '{streamer_name}'. 
+        Their Gamertag is '{gamer_tag}'.
+        Act as a Vegas oddsmaker. Generate a specific prop bet with 2 to 4 options.
+        Determine exactly how many seconds this bet should stay open to build suspense.
+        Output strict JSON: {{"question": "What happens?", "lock_seconds": 90, "options": {{"a": {{"text": "TD", "odds": 2.5}}}} }}
+        """
+        try:
+            img = Image.open(image_path)
+            response = self.client.models.generate_content(model=self.model, contents=[prompt, img], config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.8))
+            return json.loads(self._clean_json(response.text))
+        except Exception as e: return None
+
+    def analyze(self, image_path, game_type, streamer_name, gamer_tag, user_question=None, scout_notes=None, ocr_text=None, recent_chat=None):
+        """The Master Broadcast Booth function. Returns both spoken advice and chat commentary."""
+        
+        # THE TANDEM DUO PROMPT: Forces the AI to split its brain into two roles.
         persona_rules = f"""
-        CRITICAL INSTRUCTION: You MUST completely impersonate this character/persona: {personality_prompt}.
-        Speak exactly like them. Use their catchphrases, tone, slang, and attitude. Do NOT break character.
+        CRITICAL INSTRUCTION: You are operating as TWO distinct AI personalities working in tandem in a broadcast booth:
+        1. THE TACTICAL COACH (Generates the "advice" field): Speak directly to the streamer, '{streamer_name}'. Provide high-level, cutthroat {game_type} strategy. Be analytical and sharp.
+        2. THE COLOR COMMENTATOR (Generates the "commentary" field): Speak directly to the Twitch Chat viewers. Describe the on-screen action, hype up the stream, and WELCOME/SHOUT OUT the viewers seen in the recent chat log. Keep it engaging.
         """
         
-        player_context = f"The player you are coaching has the Gamertag: '{gamer_tag}'. You must root for them." if gamer_tag else "You are coaching the player."
-        game_rules = f"They are currently playing {game_type}."
+        player_context = f"The visual Gamertag on screen is '{gamer_tag}'."
+        game_rules = f"They are playing {game_type}."
+        
+        # Injects the locally gathered OCR data and Twitch Chat straight into the prompt
+        ocr_context = f"CRITICAL UI DATA (Trust this text over the image): {ocr_text}\n" if ocr_text else ""
+        chat_context = f"RECENT TWITCH CHAT LOG:\n{recent_chat}\n" if recent_chat else "No recent chat.\n"
         
         if game_type == "Madden":
             game_rules += f"""
             CRITICAL MADDEN INSTRUCTIONS:
-            - Scan the defensive shell pre-snap. Are there 1 or 2 high safeties? Identify Cover 2, Cover 3, Cover 4, or Man.
-            - PLAYER IDENTIFICATION: Look for a ring under a player's feet. GREEN ring = the player you are coaching. RED ring = the human opponent. GRAY ring = CPU.
-            - SITUATIONAL FOOTBALL: Read the scoreboard. Find the Down, Distance, Score, and Time remaining. Tailor advice strictly to this context.
-            - X-FACTORS: Scan for glowing 'X' or Star icons. Warn the player to double-team or avoid them.
-            - PLAY CLOCK: If under 5 seconds, urgently tell them to snap the ball.
-            - STAMINA: If the user's green stamina ring is draining rapidly on a return, warn them to cover the ball.
-            - OPPONENT PROFILING: Scan the scoreboard for the opponent's Gamertag (the text that is NOT '{gamer_tag}'). Output it exactly in a JSON field called "opponent_tag".
-            - Output an extra JSON field called "scouting_note" containing a 1-sentence observation of the opponent's current tendency or personnel.
+            - TEAM DETECTION: Read the OCR SCOREBOARD text. Determine which team '{streamer_name}' is controlling, and which team the opponent controls. 
+            - OPPONENT PROFILING: Scan the top banners for the active opponent. Find the tag that is NOT '{gamer_tag}'. IF YOU ARE IN A MENU, output exactly "None".
+            - SITUATIONAL FOOTBALL: Read the Quarter, Game Clock, Play Clock, Down, and Distance from the UI Data provided. 
+            - Scan defensive shells pre-snap.
+            - Output JSON: {{"advice": "spoken", "commentary": "chat (MAX 400 CHARS)", "opponent_tag": "tag", "scouting_note": "note", "streamer_team": "team", "opponent_team": "team"}}
             """
             
-        memory_context = ""
-        if scout_notes and len(scout_notes) > 0:
-            memory_context = "PAST OBSERVATIONS OF THIS OPPONENT:\n" + "\n".join(scout_notes) + "\nUse these past tendencies to predict what they might do next."
+        # Combines the last 5 database notes into a memory block
+        memory_context = "PAST OBSERVATIONS OF OPPONENT:\n" + "\n".join([str(note) for note in scout_notes if note]) if scout_notes else ""
 
-        if user_question:
-            prompt = f"""
-            {persona_rules}
-            {player_context}
-            {game_rules}
-            {memory_context}
-            They asked: "{user_question}"
-            Answer them directly. Output JSON: {{"advice": "Spoken answer", "commentary": "Twitch chat comment", "opponent_tag": "Gamertag here", "scouting_note": "1-sentence observation"}}
-            """
-        else:
-            prompt = f"""
-            {persona_rules}
-            {player_context}
-            {game_rules}
-            {memory_context}
-            Analyze the screen. Output JSON: {{"advice": "Spoken tip", "commentary": "Twitch comment", "opponent_tag": "Gamertag here", "scouting_note": "1-sentence observation"}}
-            """
+        if user_question: prompt = f"{persona_rules}\n{player_context}\n{game_rules}\n{ocr_context}{chat_context}{memory_context}\nViewer Asked: '{user_question}'. Answer them. Output strict JSON."
+        else: prompt = f"{persona_rules}\n{player_context}\n{game_rules}\n{ocr_context}{chat_context}{memory_context}\nAnalyze screen. Output strict JSON."
         
         try:
             img = Image.open(image_path)
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=[prompt, img],
-                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.8)
-            )
-            clean_text = self._clean_json(response.text)
-            return json.loads(clean_text)
-        except Exception as e:
-            print(f"❌ Gemini Error: {e}")
-            return None
+            response = self.client.models.generate_content(model=self.model, contents=[prompt, img], config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.8))
+            return json.loads(self._clean_json(response.text))
+        except Exception as e: return None
+
