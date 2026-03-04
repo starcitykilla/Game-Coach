@@ -3,11 +3,13 @@
 # NEVER upload your real config.py with your actual API keys to GitHub!
 
 # --- API KEYS ---
-# Get your Twitch Token from: https://twitchapps.com/tmi/
 TWITCH_TOKEN = "oauth:your_twitch_oauth_token_here" 
-
-# Get your Gemini API Key from: https://aistudio.google.com/app/apikey
 GEMINI_API_KEY = "your_google_gemini_api_key_here"  
+
+# --- SUPABASE CLOUD VAULT ---
+SUPABASE_URL = "https://your-project-url.supabase.co"
+SUPABASE_KEY = "your_anon_public_key_here"
+ 
 
 # --- STREAM IDENTITY ---
 CHANNEL_NAME = "your_twitch_channel_here"      # Your Twitch channel name (lowercase)
