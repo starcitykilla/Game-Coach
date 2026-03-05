@@ -1,4 +1,3 @@
-# engines.py
 import sqlite3
 import json
 import time
@@ -247,13 +246,106 @@ class AIEngine:
 
     def _clean_json(self, text):
         text = text.strip()
-        if text.startswith("
-http://googleusercontent.com/immersive_entry_chip/0
-http://googleusercontent.com/immersive_entry_chip/1
-http://googleusercontent.com/immersive_entry_chip/2
+        # Reformatted to prevent horizontal copy-paste cutoff issues
+        if text.startswith("```json"):
+            text = text[7:]
+        elif text.startswith("```"):
+            text = text[3:]
+            
+        if text.endswith("```"):
+            text = text[:-3]
+            
+        return text.strip()
 
-Boot up `main.py`! The next time your AI logs a scouting note about an opponent or adds a dollar to your bankroll, you can literally go to your Supabase website dashboard, click on the **Table Editor**, and watch the data populate live. 
+    def generate_prop_bet(self, image_path, game_type, streamer_name, gamer_tag, audio_context=""):
+        prompt = f"""
+        Look at this gameplay of {game_type}. You are coaching '{streamer_name}'. Gamertag: '{gamer_tag}'.
+        Recent Game Audio: "{audio_context}"
+        Act as a Vegas oddsmaker. Generate a live prop bet with 2 to 4 options (a, b, c, d) with decimal odds.
+        Output strict JSON: {{"question": "What happens?", "options": {{"a": {{"text": "TD", "odds": 2.5}}}} }}
+        """
+        try:
+            img = Image.open(image_path)
+            response = self.client.models.generate_content(model=self.model, contents=[prompt, img], config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.7))
+            return json.loads(self._clean_json(response.text))
+        except Exception: return None
 
-How does it feel to have an enterprise-grade cloud backend running your stream?
+    def generate_game_props(self, image_path, game_type, streamer_name, gamer_tag):
+        prompt = f"""
+        Look at this opening screen of {game_type}. You are coaching '{streamer_name}'. Gamertag: '{gamer_tag}'.
+        Act as a Vegas oddsmaker. Generate a "Pre-Game Parlay" prop bet with 3 specific Over/Under options.
+        Output strict JSON: {{"question": "Pre-Game Prop: Which hits?", "options": {{"a": {{"text": "Over 2.5 Pass TDs", "odds": 1.9}}}} }}
+        """
+        try:
+            img = Image.open(image_path)
+            response = self.client.models.generate_content(model=self.model, contents=[prompt, img], config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.7))
+            return json.loads(self._clean_json(response.text))
+        except Exception: return None
 
+    def generate_auto_prop(self, image_path, game_type, streamer_name, gamer_tag, audio_context=""):
+        prompt = f"""
+        Look at this gameplay of {game_type}. You are coaching '{streamer_name}'. Gamertag: '{gamer_tag}'.
+        Recent Game Audio: "{audio_context}"
+        Act as a Vegas oddsmaker. Generate a specific prop bet with 2 to 4 options. Determine exactly how many seconds this bet should stay open to build suspense.
+        Output strict JSON: {{"question": "What happens?", "lock_seconds": 90, "options": {{"a": {{"text": "TD", "odds": 2.5}}}} }}
+        """
+        try:
+            img = Image.open(image_path)
+            response = self.client.models.generate_content(model=self.model, contents=[prompt, img], config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.8))
+            return json.loads(self._clean_json(response.text))
+        except Exception: return None
 
+    def check_bet_resolution(self, image_path, game_type, active_bet, ocr_text=""):
+        prompt = f"""
+        You are a Vegas referee watching {game_type}.
+        The current active prop bet is: "{active_bet['question']}"
+        The betting options are: {active_bet['options']}
+        CRITICAL UI DATA: {ocr_text}
+        
+        Look at the image and the UI data. Has the explicit outcome of this bet happened yet?
+        If you are 100% certain an option has won, set "status" to "resolved" and "winning_key" to the winning option's letter (e.g., "a", "b").
+        If the bet is still ongoing, or you aren't absolutely sure yet, set "status" to "pending" and "winning_key" to null.
+        Output strict JSON: {{"status": "pending", "winning_key": null, "reason": "brief explanation"}}
+        """
+        try:
+            img = Image.open(image_path)
+            response = self.client.models.generate_content(
+                model=self.model, 
+                contents=[prompt, img], 
+                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2)
+            )
+            return json.loads(self._clean_json(response.text))
+        except Exception as e: 
+            return None
+
+    def analyze(self, image_path, game_type, streamer_name, gamer_tag, user_question=None, scout_notes=None, ocr_text=None, recent_chat=None, audio_context=""):
+        persona_rules = f"""
+        CRITICAL INSTRUCTION: You are a hype Color Commentator for '{streamer_name}'. 
+        Speak directly to the Twitch Chat viewers. Describe the on-screen action, hype up the stream, and WELCOME/SHOUT OUT the viewers seen in the chat log.
+        """
+        player_context = f"The visual Gamertag on screen is '{gamer_tag}'."
+        game_rules = f"They are playing {game_type}."
+        
+        ocr_context = f"CRITICAL UI DATA (Trust this text): {ocr_text}\n" if ocr_text else ""
+        chat_context = f"RECENT TWITCH CHAT LOG:\n{recent_chat}\n" if recent_chat else "No recent chat.\n"
+        audio_prompt = f"RECENT GAME AUDIO (Announcers/Action):\n{audio_context}\n" if audio_context else ""
+        
+        if game_type == "Madden":
+            game_rules += f"""
+            CRITICAL MADDEN INSTRUCTIONS:
+            - OPPONENT PROFILING: Scan the top banners. Find the tag that is NOT '{gamer_tag}'. IF YOU ARE IN A MENU, output exactly "None".
+            - HIGHLIGHT DETECTION: If the Audio or OCR indicates a massive, game-changing play just happened (Touchdown, Interception, Fumble, Game Winner), set "highlight_play" to true. Otherwise, false.
+            - Output JSON: {{"commentary": "chat (MAX 400 CHARS)", "opponent_tag": "tag", "scouting_note": "note", "highlight_play": false}}
+            """
+            
+        memory_context = "PAST OBSERVATIONS OF OPPONENT:\n" + "\n".join([str(note) for note in scout_notes if note]) if scout_notes else ""
+
+        prompt = f"{persona_rules}\n{player_context}\n{game_rules}\n{ocr_context}{audio_prompt}{chat_context}{memory_context}\n"
+        if user_question: prompt += f"Viewer Asked: '{user_question}'. Answer them. Output strict JSON."
+        else: prompt += "Analyze screen. Output strict JSON."
+        
+        try:
+            img = Image.open(image_path)
+            response = self.client.models.generate_content(model=self.model, contents=[prompt, img], config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.8))
+            return json.loads(self._clean_json(response.text))
+        except Exception: return None
