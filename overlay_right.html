@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <style>
+        body { margin: 0; padding: 10px; font-family: 'Arial', sans-serif; color: white; overflow: hidden; }
+        .widget { background: rgba(0, 0, 0, 0.85); border: 2px solid #ff0055; border-radius: 10px; padding: 15px; width: 300px; box-shadow: 0 0 15px #ff0055; }
+        h2 { margin: 0 0 10px 0; color: #ff0055; text-transform: uppercase; font-size: 16px; border-bottom: 1px solid #444; padding-bottom: 5px; }
+        .bet-option { display: flex; justify-content: space-between; align-items: center; background: #222; padding: 10px; margin-bottom: 5px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+        .bet-text { flex: 1; padding-right: 10px; }
+        .odds { color: #00ffcc; white-space: nowrap; }
+        .bet-question { font-size: 13px; font-weight: bold; color: #ffcc00; margin-bottom: 10px; padding-bottom: 5px; border-bottom: 1px solid #444; }
+    </style>
+</head>
+<body>
+    <div class="widget" id="bet-widget" style="display: none;">
+        <h2>🎲 LIVE SPORTSBOOK (!bet)</h2>
+        <div id="market-container"></div>
+    </div>
+    <script>
+        async function fetchRightData() {
+            try {
+                const response = await fetch('http://localhost:8000/stream_data.json');
+                const data = await response.json();
+                const betWidget = document.getElementById('bet-widget');
+                const marketDiv = document.getElementById('market-container');
+
+                if (data.market_display && Object.keys(data.market_display.options).length > 0) {
+                    betWidget.style.display = 'block';
+                    let newMarketHTML = `<div class="bet-question">${data.market_display.question}</div>`;
+                    for (const [key, details] of Object.entries(data.market_display.options)) {
+                        newMarketHTML += `<div class="bet-option"><span class="bet-text">!bet ${key.toLowerCase()} - ${details.text}</span><span class="odds">${details.odds}x</span></div>`;
+                    }
+                    if (marketDiv.innerHTML !== newMarketHTML) marketDiv.innerHTML = newMarketHTML;
+                } else {
+                    betWidget.style.display = 'none';
+                    marketDiv.innerHTML = "";
+                }
+            } catch (error) {}
+        }
+        setInterval(fetchRightData, 500);
+    </script>
+</body>
+</html>
