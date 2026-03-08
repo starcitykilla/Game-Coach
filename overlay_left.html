@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <style>
+        body { margin: 0; padding: 10px; font-family: 'Arial', sans-serif; color: white; overflow: hidden; }
+        .widget { background: rgba(0, 0, 0, 0.85); border: 2px solid #5e17eb; border-radius: 10px; padding: 15px; width: 300px; box-shadow: 0 0 15px #5e17eb; }
+        h2 { margin: 0 0 10px 0; color: #00ffcc; text-transform: uppercase; font-size: 16px; border-bottom: 1px solid #444; padding-bottom: 5px; }
+        .note { background: rgba(255, 255, 255, 0.1); padding: 10px; margin-bottom: 8px; border-left: 4px solid #00ffcc; font-size: 13px; line-height: 1.4; border-radius: 0 4px 4px 0; }
+    </style>
+</head>
+<body>
+    <div class="widget" id="scout-widget">
+        <h2 id="coach-name">Coach's Film Room</h2>
+        <div id="notes-container">Waiting for AI data...</div>
+    </div>
+    <script>
+        async function fetchLeftData() {
+            try {
+                const response = await fetch('http://localhost:8000/stream_data.json');
+                const data = await response.json();
+                let titleText = data.persona + " Film Room";
+                if (data.opponent) titleText += " (vs " + data.opponent + ")";
+                document.getElementById('coach-name').innerText = titleText;
+
+                const notesDiv = document.getElementById('notes-container');
+                const newNotesHTML = data.notes.map(note => `<div class="note">${note}</div>`).join('');
+                if (notesDiv.innerHTML !== newNotesHTML) notesDiv.innerHTML = newNotesHTML;
+            } catch (error) {}
+        }
+        setInterval(fetchLeftData, 500);
+    </script>
+</body>
+</html>
