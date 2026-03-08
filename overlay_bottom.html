@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { margin: 0; padding: 10px; font-family: 'Arial', sans-serif; color: white; overflow: hidden; }
+        .ticker-wrapper { display: flex; align-items: center; background: rgba(0, 0, 0, 0.9); border: 2px solid #ffcc00; border-radius: 8px; padding: 8px 15px; box-shadow: 0 0 10px #ffcc00; width: 100%; box-sizing: border-box; }
+        .ticker-title { font-weight: bold; color: #ffcc00; margin-right: 20px; white-space: nowrap; text-transform: uppercase; border-right: 2px solid #444; padding-right: 15px; }
+        .ticker-items { display: flex; gap: 20px; flex-wrap: nowrap; overflow: hidden; }
+        .ticker-item { display: flex; align-items: center; font-size: 14px; font-weight: bold; white-space: nowrap; }
+        .player-name { color: #fff; margin-right: 8px; }
+        .player-cash { color: #00ffcc; }
+    </style>
+</head>
+<body>
+    <div class="ticker-wrapper" id="leaderboard-widget" style="display: none;">
+        <div class="ticker-title">🏆 HIGH ROLLERS</div>
+        <div class="ticker-items" id="leaderboard-container"></div>
+    </div>
+    <script>
+        async function fetchBottomData() {
+            try {
+                const response = await fetch('http://localhost:8000/stream_data.json');
+                const data = await response.json();
+                const leaderboardWidget = document.getElementById('leaderboard-widget');
+                const leaderboardDiv = document.getElementById('leaderboard-container');
+
+                if (data.leaderboard && data.leaderboard.length > 0) {
+                    leaderboardWidget.style.display = 'flex';
+                    let newLeaderboardHTML = "";
+                    const medals = ["🥇", "🥈", "🥉", "🏅", "🏅"];
+
+                    data.leaderboard.forEach((player, index) => {
+                        newLeaderboardHTML += `
+                        <div class="ticker-item">
+                            <span class="player-name">${medals[index] || "🏅"} ${player[0]}</span>
+                            <span class="player-cash">$${player[1]}</span>
+                        </div>`;
+                    });
+                    if (leaderboardDiv.innerHTML !== newLeaderboardHTML) leaderboardDiv.innerHTML = newLeaderboardHTML;
+                } else {
+                    leaderboardWidget.style.display = 'none';
+                }
+            } catch (error) {}
+        }
+        setInterval(fetchBottomData, 500);
+    </script>
+</body>
+</html>
