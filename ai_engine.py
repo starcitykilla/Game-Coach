@@ -39,6 +39,17 @@ class AIEngine:
         prompt = f"""You are a Vegas referee watching {game_type}. Active bet: "{active_bet['question']}". Options: {active_bet['options']} CRITICAL UI DATA: {ocr_text}. Did the play or event just conclude? If yes, resolve it immediately. Output JSON: {{"status": "resolved", "winning_key": "a", "reason": "brief explanation"}} OR {{"status": "pending", "winning_key": null, "reason": "still waiting"}}"""
         return self._safe_generate(prompt, image_path, temp=0.2) 
 
+    def generate_dynamic_bounties(self, image_path, game_type):
+        prompt = f"""
+        You are a Twitch stream manager for a channel playing {game_type}.
+        Look at the gameplay. Generate 3 interactive "Bounties" that viewers can purchase with their Virtual Vegas bankroll to force the streamer to do something fun, risky, or silly right now.
+        Make them highly specific to the mechanics of {game_type}. 
+        Keep costs between 1000 and 5000. Keep keys to a single lowercase word (e.g., 'fakepunt', 'hydrate', 'melee', 'potion').
+        Output strict JSON EXACTLY like this:
+        {{"bounties": {{"heal": {{"cost": 1500, "desc": "Force streamer to use a health potion right now!"}}}}}}
+        """
+        return self._safe_generate(prompt, image_path, temp=0.8)
+
     def analyze(self, image_path, game_type, streamer_name, gamer_tag, current_opponent=None, user_question=None, scout_notes=None, ocr_text=None, recent_chat=None, audio_context="", encounter_count=0, death_count=0):
         opponent_memory = f"STICKY MEMORY: Playing against '{current_opponent}'. " if current_opponent and current_opponent != "CPU" else ""
         
