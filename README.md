@@ -41,5 +41,3 @@ The Command Center is broken down into isolated engines for maximum stability an
    python3 main.py
 
 Built by BlindMan Gaming LLC (BMG).
-That README is going to look incredibly clean on your repo.
-Once you get that pushed up on your break and tested at the rig later, do you want to start building out the custom HTML/Browser Source overlays for OBS so the stream actually sees a giant popup when someone buys a bounty?
