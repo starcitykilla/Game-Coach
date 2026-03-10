@@ -39,8 +39,7 @@ class CommanderBot(commands.Bot):
         self.viewer_coach_requests = 0 
 
         self.bounty_board = {
-            "fakepunt": {"cost": 5000, "desc": "Force Coach to run a Fake Punt on 4th Down!"},
-            "blitz": {"cost": 3000, "desc": "Engage Eight! Coach MUST run an all-out blitz next defensive play."}
+            "hydrate": {"cost": 1000, "desc": "Coach has to take a drink of water!"}
         }
 
         os.makedirs("bet_history_frames", exist_ok=True)
@@ -67,11 +66,24 @@ class CommanderBot(commands.Bot):
     def trigger_manual_clip(self):
         self.log_callback("SYSTEM", "🎬 MANUAL CLIP INITIATED!")
 
+    def _refresh_bounties(self, frame, game_type):
+        """Runs in background to generate new game-specific bounties."""
+        bounty_img = f"temp_bounty_{uuid.uuid4().hex}.jpg"
+        cv2.imwrite(bounty_img, cv2.resize(frame, (640, 360)), [cv2.IMWRITE_JPEG_QUALITY, 60])
+        
+        self.log_callback("SYSTEM", f"🔄 Generating new dynamic bounties for {game_type}...")
+        data = self.strategist.generate_dynamic_bounties(bounty_img, game_type)
+        if os.path.exists(bounty_img): os.remove(bounty_img)
+        
+        if data and "bounties" in data:
+            self.bounty_board = data["bounties"]
+            self.log_callback("SYSTEM", f"🎯 New Bounties locked in for {game_type}!")
+
     async def event_ready(self):
         self.log_callback("SYSTEM", f"✅ Online as {self.nick}")
         self.update_overlay()
         threading.Thread(target=self.game_loop, daemon=True).start()
-        for task in [self.chat_dispatcher, self.auto_sportsbook_loop, self.ai_referee_loop, self.watcher_payout_loop, self.edge_tripwire_loop, self.wake_word_loop]:
+        for task in [self.chat_dispatcher, self.auto_sportsbook_loop, self.ai_referee_loop, self.watcher_payout_loop, self.edge_tripwire_loop, self.wake_word_loop, self.tutorial_announcer_loop]:
             asyncio.create_task(task())
 
     async def auto_sportsbook_loop(self):
@@ -142,6 +154,26 @@ class CommanderBot(commands.Bot):
             paid = sum(1 for user, last in list(self.active_viewers.items()) if time.time() - last < 1800 and not self.brain.add_funds(user, 100))
             if paid > 0 and channel: await channel.send(f"💸 VEGAS PAYOUT: Dropped $100 into {paid} active viewer accounts!")
 
+    async def tutorial_announcer_loop(self):
+        """Periodically teaches chat how to use the bot and lists active bounties."""
+        channel = self.get_channel(config.CHANNEL_NAME)
+        while self.running:
+            await asyncio.sleep(900) # Runs every 15 minutes
+            if not channel or not self.chat_enabled: continue
+
+            cmd_text = "🤖 BMG COMMAND CENTER: Type !bankroll to check your $$ | Type !heycoach [question] to ask the AI (3 uses per stream) | Type !bet [option] [amount] when the casino opens!"
+            await channel.send(cmd_text)
+            await asyncio.sleep(2) 
+
+            bounty_text = "🎯 ACTIVE BOUNTIES: "
+            if self.bounty_board:
+                bounties = [f"!bounty {k} (${v['cost']}) - {v['desc']}" for k, v in self.bounty_board.items()]
+                bounty_text += " || ".join(bounties)
+            else:
+                bounty_text += "Coach is scouting new bounties..."
+                
+            await channel.send(bounty_text)
+
     async def wake_word_loop(self):
         while self.running:
             await asyncio.sleep(1) 
@@ -202,6 +234,8 @@ class CommanderBot(commands.Bot):
         if data:
             if "game_type" in data and data["game_type"] != self.current_game:
                 self.current_game = data["game_type"]
+                threading.Thread(target=self._refresh_bounties, args=(frame, self.current_game), daemon=True).start()
+                
                 if "Menu" in self.current_game or "Lobby" in self.current_game:
                     self.current_opponent, self.encounter_count, self.death_count = None, 0, 0
                     self.update_overlay()
@@ -270,3 +304,26 @@ class CommanderBot(commands.Bot):
             args=(f"!Viewer '{ctx.author.name}' asked: {question}",), 
             daemon=True
         ).start()
+
+    @commands.command(name='bounty')
+    async def buy_bounty(self, ctx: commands.Context):
+        """Allows viewers to purchase bounties to force streamer actions."""
+        parts = ctx.message.content.split(' ')
+        if len(parts) < 2:
+            await ctx.send(f"@{ctx.author.name}, specify a bounty! (e.g., !bounty fakepunt)")
+            return
+        
+        choice = parts[1].lower()
+        if choice not in self.bounty_board:
+            await ctx.send(f"@{ctx.author.name}, that bounty doesn't exist on the board right now!")
+            return
+        
+        cost = self.bounty_board[choice]['cost']
+        balance = self.brain.get_bankroll(ctx.author.name.lower())
+        
+        if balance < cost:
+            await ctx.send(f"🚫 @{ctx.author.name}, you need ${cost} but only have ${balance}!")
+            return
+            
+        self.brain.add_funds(ctx.author.name.lower(), -cost)
+        await ctx.send(f"🚨 BOUNTY REDEEMED! @{ctx.author.name} just spent ${cost} to trigger: {self.bounty_board[choice]['desc']} 🚨 BMG, YOU MUST DO THIS NOW!")
