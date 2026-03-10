@@ -1,35 +1,56 @@
-import customtkinter as ctk
+import json
+import threading
+import pyaudio
+import numpy as np
+from vosk import Model, KaldiRecognizer, SetLogLevel
+from ctypes import cdll, c_char_p, c_int, CFUNCTYPE
 
-class AIInputWindow:
-    def __init__(self, parent, bot):
-        self.window = ctk.CTkToplevel(parent)
-        self.window.title("AI Diagnostic Feed 📡")
-        self.window.geometry("550x650")
-        self.window.attributes('-topmost', True) 
-        self.bot = bot
+ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
+def py_error_handler(filename, line, function, err, fmt): pass
+c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
 
-        ctk.CTkLabel(self.window, text="🎙️ LIVE AUDIO TRANSCRIPT", font=("Impact", 18), text_color="#00FF00").pack(pady=(15, 5))
-        self.txt_audio = ctk.CTkTextbox(self.window, height=150, wrap="word", font=("Consolas", 14), fg_color="black", text_color="#00FF00", border_color="#00FF00", border_width=2)
-        self.txt_audio.pack(fill="x", padx=15, pady=5)
+class AudioEngine:
+    def __init__(self, model_path="model"):
+        self.transcript, self.current_partial, self.running, self.current_volume = [], "", True, 0
+        SetLogLevel(-1)
+        try: cdll.LoadLibrary('libasound.so').snd_lib_error_set_handler(c_error_handler)
+        except OSError: pass
 
-        ctk.CTkLabel(self.window, text="👁️ LATEST OCR READ", font=("Impact", 18), text_color="#00FFFF").pack(pady=(15, 5))
-        self.txt_ocr = ctk.CTkTextbox(self.window, height=300, wrap="word", font=("Consolas", 14), fg_color="black", text_color="#00FFFF", border_color="#00FFFF", border_width=2)
-        self.txt_ocr.pack(fill="both", expand=True, padx=15, pady=5)
+        try:
+            self.model = Model(model_path)
+            self.recognizer = KaldiRecognizer(self.model, 16000)
+            self.p = pyaudio.PyAudio()
+            self.stream = self.p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=8000)
+            self.stream.start_stream()
+            threading.Thread(target=self._listen_loop, daemon=True).start()
+        except Exception as e:
+            print(f"⚠️ AudioEngine failed: {e}"); self.running = False
 
-        self.update_feed()
+    def _listen_loop(self):
+        while self.running:
+            try:
+                raw_data = self.stream.read(4000, exception_on_overflow=False)
+                audio_data = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32)
+                self.current_volume = int(np.abs(audio_data).mean())
 
-    def update_feed(self):
-        if self.window.winfo_exists() and self.bot:
-            audio_text = self.bot.ears.get_transcript() if getattr(self.bot, 'ears', None) else "Audio Engine Offline..."
-            ocr_text = getattr(self.bot, 'last_ocr_text', "Waiting for the first visual scan...")
+                audio_data[1:] = audio_data[1:] - 0.95 * audio_data[:-1]
+                audio_data = np.where(np.abs(audio_data) < 300, 0, audio_data)
 
-            if self.txt_audio.get("1.0", "end-1c").strip() != audio_text.strip():
-                self.txt_audio.delete("1.0", "end")
-                self.txt_audio.insert("end", audio_text)
-                self.txt_audio.see("end")
+                if self.recognizer.AcceptWaveform(audio_data.astype(np.int16).tobytes()):
+                    if text := json.loads(self.recognizer.Result()).get("text", ""):
+                        self.transcript.append(text)
+                        if len(self.transcript) > 5: self.transcript.pop(0)
+                    self.current_partial = ""
+                elif partial := json.loads(self.recognizer.PartialResult()).get("partial", ""):
+                    self.current_partial = partial
+            except Exception: pass
 
-            if self.txt_ocr.get("1.0", "end-1c").strip() != ocr_text.strip():
-                self.txt_ocr.delete("1.0", "end")
-                self.txt_ocr.insert("end", ocr_text)
+    def get_transcript(self):
+        full_text = " ".join(self.transcript)
+        if self.current_partial: full_text += f" {self.current_partial}..."
+        return full_text.strip()
 
-            self.window.after(1000, self.update_feed)
+    def __del__(self):
+        self.running = False
+        if hasattr(self, 'stream'): self.stream.stop_stream(); self.stream.close()
+        if hasattr(self, 'p'): self.p.terminate()a
