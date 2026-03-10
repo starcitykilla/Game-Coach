@@ -5,12 +5,9 @@ import os
 import uuid
 import time
 
-
 class VoiceEngine:
     """Dynamically generates and plays high-quality Text-to-Speech audio."""
-
     def __init__(self):
-        # Initialize the audio mixer
         pygame.mixer.init()
 
     def speak(self, text):
@@ -20,20 +17,15 @@ class VoiceEngine:
     def _speak_thread(self, text):
         try:
             filename = f"temp_voice_{uuid.uuid4().hex}.mp3"
-
-            # Generate the voice (tld='com' for US accent, 'co.uk' for British)
-            tts = gTTS(text=text, lang='en', tld='com')
+            tts = gTTS(text=text, lang='en', tld='com') 
             tts.save(filename)
-
-            # Load and play the audio file
+            
             pygame.mixer.music.load(filename)
             pygame.mixer.music.play()
-
-            # Wait for the sentence to finish speaking
+            
             while pygame.mixer.music.get_busy():
                 time.sleep(0.1)
-
-            # Unload the file from RAM and delete it from the hard drive
+                
             pygame.mixer.music.unload()
             if os.path.exists(filename):
                 os.remove(filename)
